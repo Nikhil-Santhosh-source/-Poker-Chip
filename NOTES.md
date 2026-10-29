@@ -8,8 +8,11 @@ The host picks the starting chips, blinds and turn timer.
   markers in `index.html`. `tests/engine.js` loads that block straight from `index.html`, so the
   tests always run the code that ships.
 - **Networking (v3)**: messages go through public MQTT brokers over secure WebSockets
-  (`wss://broker.emqx.io:8084` and `wss://broker.hivemq.com:8884`, via mqtt.js 5.10.4).
-  Every message is published to **both** relays, and receivers drop duplicates by message id (`mid`).
+  (`wss://public.cloud.shiftr.io` on port 443, `wss://broker.emqx.io:8084` and
+  `wss://broker.hivemq.com:8884`, via mqtt.js 5.10.4). Every message is published to **all** connected
+  relays, and receivers drop duplicates by message id (`mid`). The shiftr.io relay matters most: it's on
+  port 443, so it works on networks that block 8084/8884 (seen in testing: such a network reset every
+  connection on those ports, including to portquiz.net).
 - **Room isolation**: the topic is `feltfortune/v3/<sha256("room:"+CODE)[:32]>`. The payload is
   AES-GCM encrypted with a key derived by PBKDF2 from the room code. Strangers on the public broker see
   only random topic names and ciphertext.
@@ -33,7 +36,8 @@ The host picks the starting chips, blinds and turn timer.
   and the "deal the flop" hints work as normal.
 - At showdown, `doChipsShowdown` builds the main pot and side pots with `buildPots` (each pot lists
   the players who can win it). A pot only one player can win is paid out automatically (an uncalled
-  bet). For the rest, `stage = 'award'`, and any seated player picks the winner(s) with
+  bet). For the rest, `stage = 'award'`, and **only the host** picks the winner(s) (enforced in
+  `hostDispatch`, so a player can't award a pot by sending the message themselves) with
   `awardPot(state, potIndex, ids)`. Splits divide evenly, and the odd chip goes to the first player picked.
 - Players see each other as `seatN` aliases, so the host maps those back to real ids before awarding.
 
@@ -53,7 +57,7 @@ to the relays, which works on Wi-Fi, mobile data, and mixes of both.
   private one (HiveMQ Cloud and EMQX Cloud both have free tiers).
 - A player at the table who knows the room code and digs into dev tools could still read
   other players' join messages. This is fine for friends, but not for real-money play.
-- A few strict networks block ports 8084/8884. Mobile data works around that.
+- If a network blocks *all* of the relays (rare, since one is on port 443), mobile data works around it.
 
 ## Tests
 ```

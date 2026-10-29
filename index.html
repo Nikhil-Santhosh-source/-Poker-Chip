@@ -1045,12 +1045,19 @@ function rebuy(state, playerId){
    secure WebSockets, so it works on any network where normal websites
    work (no peer-to-peer, no accounts, no server of our own).
    The host's browser is still the referee: it keeps the real game state
-   and everyone else sends it requests. We connect to two relays at once
-   and send everything through both, so one being down doesn't matter.
+   and everyone else sends it requests. We connect to three relays at once
+   and send everything through all of them, so one being down or blocked
+   doesn't matter.
    Messages are encrypted with a key derived from the room code, and
    topic names are hashed, so strangers on the relay can't read the game.
    ========================================================= */
-const RELAYS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+// shiftr.io runs on port 443 (the normal https port), so it still works on
+// school/office/mobile networks that block the other relays' ports 8084/8884.
+const RELAYS = [
+  {url:'wss://public.cloud.shiftr.io', opts:{username:'public', password:'public'}},
+  {url:'wss://broker.emqx.io:8084/mqtt'},
+  {url:'wss://broker.hivemq.com:8884/mqtt'}
+];
 const HEARTBEAT_MS = 4000;
 const LOST_AFTER_MS = 16000;   // no message for this long = disconnected
 const JOIN_TIMEOUT_MS = 15000;
@@ -1157,8 +1164,8 @@ async function netOpen(code, subTopics, onMessage){
   n.base = 'feltfortune/v3/' + (await sha256hex('room:'+code)).slice(0,32);
   if (n.closed) return n;
   const subs = subTopics(n.base);
-  RELAYS.forEach(url=>{
-    const c = mqtt.connect(url, {
+  RELAYS.forEach(relay=>{
+    const c = mqtt.connect(relay.url, {...(relay.opts||{}),
       clientId: 'ff_'+uid().slice(0,20), clean:true, keepalive:30,
       reconnectPeriod:2500, connectTimeout:10000, resubscribe:true
     });
@@ -1218,6 +1225,7 @@ function viewFor(pid, s){
     }
   });
   v.winners = (v.winners||[]).map(id=> alias[id] || id);
+  v.hostSeat = s.players.findIndex(p=>p.id===myId);
   if (v.pots) v.pots.forEach(pt=>{ pt.eligible = pt.eligible.map(id=> alias[id] || id); if (pt.winners) pt.winners = pt.winners.map(id=> alias[id] || id); });
   return v;
 }
@@ -1276,7 +1284,8 @@ function hostDispatch(pid, data){
   } else if (data.t==='rebuy'){
     r = rebuy(s, pid);
   } else if (data.t==='award'){
-    if (!p || p.away) return;
+    // Real-cards showdown: only the host decides who won.
+    if (pid!==myId){ replyError(pid, 'Only the host can pick the winner'); return; }
     // Players see each other as 'seatN'; turn those back into real ids.
     const real = id=>{ const m = /^seat(\d+)$/.exec(String(id)); return m && s.players[+m[1]] ? s.players[+m[1]].id : String(id); };
     r = awardPot(s, Number(data.pot), (Array.isArray(data.winners) ? data.winners : []).map(real), p.name);
@@ -2118,7 +2127,26 @@ function renderAward(area, s, me){
   const b = document.createElement('b'); b.textContent = fmt(pot.amount); h.appendChild(b);
   box.appendChild(h);
   const hint = document.createElement('p');
-  hint.textContent = 'Turn your cards over, then tap the winner. Tap more than one name to split the pot.';
+  if (!isHost){
+    // Players can see who's in the pot, but only the host can award it.
+    const host = s.players[s.hostSeat];
+    hint.textContent = `Turn your cards over. ${host ? host.name+' (the host)' : 'The host'} will pick the winner.`;
+    box.appendChild(hint);
+    const names = document.createElement('div'); names.className='names';
+    pot.eligible.forEach(id=>{
+      const pl = s.players.find(x=>x.id===id); if (!pl) return;
+      const nb = document.createElement('button'); nb.disabled = true; nb.style.cursor = 'default';
+      nb.appendChild(avatarEl(pl)); nb.append(pl.id===myId ? pl.name+' (you)' : pl.name);
+      names.appendChild(nb);
+    });
+    box.appendChild(names);
+    area.appendChild(box);
+    const note = document.createElement('div'); note.className='wait-note';
+    note.innerHTML = '<span class="spinner"></span>Waiting for the host to pick the winner…';
+    area.appendChild(note);
+    return;
+  }
+  hint.textContent = "Check everyone's cards, then tap the winner. Tap more than one name to split the pot.";
   box.appendChild(hint);
   const names = document.createElement('div'); names.className='names';
   pot.eligible.forEach(id=>{
@@ -2137,7 +2165,7 @@ function renderAward(area, s, me){
   const picked = [...awardSel.ids];
   const pickedNames = picked.map(id=> (s.players.find(x=>x.id===id)||{}).name);
   go.textContent = !picked.length ? 'Pick the winner' : picked.length===1 ? `Give ${fmt(pot.amount)} to ${pickedNames[0]}` : `Split ${fmt(pot.amount)} between ${picked.length}`;
-  go.disabled = !picked.length || !me || me.away;
+  go.disabled = !picked.length;
   go.onclick = ()=>requestAward(idx, picked);
   row.appendChild(go);
   area.appendChild(row);

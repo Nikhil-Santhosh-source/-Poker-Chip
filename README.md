@@ -50,7 +50,8 @@ if you already use one of these, upload the same `index.html`.
 - **🎴 Real cards** — for when you're sitting together with a real deck. The app only
   handles the chips: blinds, whose turn it is, bets, the pot and side pots. It tells
   the dealer when to deal the flop, turn and river. At showdown everyone turns their
-  cards over and anyone at the table taps the winner (tap two or more names to split).
+  cards over and **the host** taps the winner (tap two or more names to split). Other
+  players see who's in the pot but can't award it.
   Each side pot is awarded separately, and only players who are in that pot can win it.
 
 ## Reading the table
@@ -76,14 +77,16 @@ if you already use one of these, upload the same `index.html`.
 - **Turn timer:** if someone runs out of time, they check or fold automatically.
   After two timeouts in a row they sit out until they tap **I'm back**. Anyone can
   tap **Sit out** between hands to take a break.
-- **The relays are shared community services** (EMQX and HiveMQ public brokers).
-  The game uses both at once, so if one is down the other keeps you playing.
+- **The relays are shared community services** (shiftr.io, EMQX and HiveMQ public
+  brokers). The game uses all three at once, so if one is down or blocked the others
+  keep you playing.
   Messages are encrypted with a key made from the room code, so strangers on the
   relay can't read your game.
 - **Players never receive each other's hole cards** (or the deck). The host's own
   browser does hold the full state, so the host could peek using dev tools. Fine
   for a casual game with friends, but don't use it for real-money stakes.
-- **Can't connect?** A few very strict networks (some school or office Wi-Fi) block
-  the relay ports 8084/8884. Switching that player to mobile data fixes it.
+- **Strict networks:** some school, office or mobile networks block unusual ports.
+  The shiftr.io relay uses port 443, the same port as every normal website, so the
+  game still connects there.
 - Chips are virtual and reset if everyone leaves and the host doesn't resume —
   there's no account system or persistent ledger across different game nights.
