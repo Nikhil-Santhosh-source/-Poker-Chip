@@ -43,6 +43,27 @@ if you already use one of these, upload the same `index.html`.
    On a computer you can use the keyboard: **F** fold, **C** check/call, **R** raise,
    **Enter** confirm, **L** hand log.
 
+## Two ways to play
+
+- **🃏 Deal cards** — the app shuffles, deals and shows the cards, works out the
+  best hand and pays the winner.
+- **🎴 Real cards** — for when you're sitting together with a real deck. The app only
+  handles the chips: blinds, whose turn it is, bets, the pot and side pots. It tells
+  the dealer when to deal the flop, turn and river. At showdown everyone turns their
+  cards over and anyone at the table taps the winner (tap two or more names to split).
+  Each side pot is awarded separately, and only players who are in that pot can win it.
+
+## Reading the table
+
+- Big cards with a large rank and suit, so you can read them across the room. Turn on
+  the **four-color deck** (in Log / Ledger) to show diamonds blue and clubs green.
+- **Pot** is what's already in the middle. **Total** adds the bets on the current
+  street. Your stack, every bet, the amount to call and the minimum raise are always
+  shown, and winners get a **+amount** badge.
+- **Show your cards:** after a hand you can show your left card, your right card, or both.
+- **Log / Ledger:** the hand history, plus a ledger of each player's buy-ins, stack
+  and net win/loss.
+
 ## Things worth knowing
 
 - **The host's tab is the "server."** If the host closes their browser tab or loses

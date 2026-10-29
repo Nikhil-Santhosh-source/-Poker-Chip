@@ -28,6 +28,18 @@ The host picks the starting chips, blinds and turn timer.
   and players' pings re-register them automatically. If the same table is opened in two places,
   the newer one wins and the older one steps down.
 
+## Real-cards mode (`state.mode === 'chips'`)
+- No deck and no hole cards. Streets still advance (preflop, flop, turn, river) so betting rounds
+  and the "deal the flop" hints work as normal.
+- At showdown, `doChipsShowdown` builds the main pot and side pots with `buildPots` (each pot lists
+  the players who can win it). A pot only one player can win is paid out automatically (an uncalled
+  bet). For the rest, `stage = 'award'`, and any seated player picks the winner(s) with
+  `awardPot(state, potIndex, ids)`. Splits divide evenly, and the odd chip goes to the first player picked.
+- Players see each other as `seatN` aliases, so the host maps those back to real ids before awarding.
+
+## Showing cards
+`showCards(state, id, 0 | 1 | 'both')` works once a hand is over. `viewFor` then reveals just those cards to everyone.
+
 ## Why friends couldn't join (v2 → v3)
 v2 used PeerJS (WebRTC peer-to-peer). Two players on different networks need a TURN relay to connect.
 PeerJS's free TURN server (`turn:*.turn.peerjs.com`) returned **no relay candidates** in testing,
@@ -49,4 +61,5 @@ node tests/run.js
 ```
 The tests cover hand ranking and labels, heads-up blinds, the min-raise rule, the double-deal
 guard, blinds that put players all-in, rebuys, custom chips and blinds, sitting out, side pots,
-and chip conservation over hundreds of random hands for 2, 3, 5 and 9 players.
+showing cards, real-cards pots and awards (including splits), and chip conservation over hundreds
+of random hands in both modes.

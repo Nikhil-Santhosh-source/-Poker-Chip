@@ -71,6 +71,49 @@ const act = (s, type, amt) => { const p = s.players[s.turnSeat]; const r = E.app
   }
   check('short all-in wins only main pot', s.players[0].chips===300 && s.players[1].chips===1100 && s.players[2].chips===700); }
 
+// ---- real-cards (chips only) mode ----
+const chipsTable = n => { let s = E.newTable('T', {mode:'chips'}); for (let i=0;i<n;i++) s = E.addPlayer(s,'p'+i,'P'+i); return s; };
+{ const s = E.startHand(chipsTable(3)).state; check('chips mode deals no cards', s.players.every(p=>p.cards.length===0) && s.deck.length===0); }
+{ let s = E.startHand(chipsTable(2)).state; s = act(s,'call'); s = act(s,'check');
+  check('chips mode streets advance without a board', s.stage==='flop' && s.community.length===0);
+  for (let i=0;i<6 && s.stage!=='award';i++) s = act(s,'check');
+  check('chips mode ends in award stage', s.stage==='award' && s.pots.length===1 && s.pots[0].amount===20);
+  check('award needs a valid winner', !E.awardPot(s, 0, ['nobody']).ok);
+  const r = E.awardPot(s, 0, ['p1'], 'P0');
+  check('awarding the pot pays the winner', r.ok && s.stage==='showdown' && s.players[1].chips===1010 && s.players[0].chips===990);
+  check('cannot award twice', !E.awardPot(s, 0, ['p0']).ok); }
+{ let s = E.startHand(chipsTable(2)).state; s = act(s,'call'); for (let i=0;i<7 && s.stage!=='award';i++) s = act(s,'check');
+  E.awardPot(s, 0, ['p0','p1']); check('split pot', s.players[0].chips===1000 && s.players[1].chips===1000); }
+{ let s = chipsTable(3); s.players[0].chips = 100; s = E.startHand(s).state;
+  while (E.isBetting(s)){ const p = s.players[s.turnSeat]; s = act(s, p.id==='p0' ? 'allin' : (s.currentBet-p.bet>0 ? 'call' : 'check')); }
+  check('side pots built for short all-in', s.stage==='award' && s.pots.length>=1 && s.pots[0].eligible.length===3);
+  check('cannot deal before awarding', !E.startHand(s).ok); }
+{ let s = E.startHand(chipsTable(3)).state; s = act(s,'fold'); s = act(s,'fold');
+  check('everyone folds: no award needed', s.stage==='showdown' && s.winners.length===1); }
+for (const n of [2,4,7]){
+  let s = chipsTable(n); const start = s.players.reduce((a,p)=>a+p.chips,0); let ok = true;
+  for (let h=0; h<150 && ok; h++){
+    const r = E.startHand(s); if (!r.ok) break; s = r.state; let g=0;
+    while (E.isBetting(s) && g++<400){
+      const p=s.players[s.turnSeat], toCall=s.currentBet-p.bet, roll=Math.random(), minT=s.currentBet+s.minRaise;
+      const res = roll<0.07 ? E.applyAction(s,p.id,'allin') : (roll<0.2 && toCall>0) ? E.applyAction(s,p.id,'fold') :
+        (roll<0.3 && p.chips > minT-p.bet) ? E.applyAction(s,p.id,'raise', minT) : toCall>0 ? E.applyAction(s,p.id,'call') : E.applyAction(s,p.id,'check');
+      if (!res.ok){ ok=false; break; } s = E.advanceAfterAction(res.state);
+    }
+    if (s.stage==='award') s.pots.forEach((pt,i)=>{ if (!pt.winners){ const k = 1 + Math.floor(Math.random()*pt.eligible.length); if (!E.awardPot(s, i, pt.eligible.slice(0,k)).ok) ok=false; } });
+    if (s.stage!=='showdown' || s.players.reduce((a,p)=>a+p.chips,0)!==start) ok=false;
+    s.players.forEach(p=>{ if (p.chips===0) E.rebuy(s,p.id) && (p.chips=0); });
+  }
+  check(`chips mode: chips conserved over 150 hands, ${n} players`, ok);
+}
+// show cards after a hand (dealt-cards mode)
+{ let s = E.startHand(table(2)).state; s = act(s,'fold');
+  check('cannot show mid-hand', !E.showCards(E.startHand(table(2)).state,'p0',0).ok);
+  const loser = s.players.find(p=>p.folded);
+  const r = E.showCards(s, loser.id, 1);
+  check('show one card after the hand', r.ok && loser.shown[1] && !loser.shown[0]);
+  E.showCards(s, loser.id, 'both'); check('show both cards', loser.shown[0] && loser.shown[1]); }
+
 // chip conservation over random multi-player hands
 const total = s => s.players.reduce((a,p)=>a+p.chips+p.totalBet,0);
 for (const n of [2,3,5,9]){
