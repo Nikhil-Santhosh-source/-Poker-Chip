@@ -10,7 +10,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.4/dist/mqtt.min.js"></script>
 <style>
 :root{
   --bg:#07110d;
@@ -283,6 +283,15 @@ button:focus-visible, input:focus-visible{ outline:2px solid var(--gold); outlin
 .seat-tag.red{ color:#fff; background:rgba(224,90,78,.85); }
 .seat.turn .pod{ border-color:var(--gold); box-shadow:0 0 0 3px rgba(224,184,74,.25), 0 0 22px rgba(224,184,74,.45); animation:pulse 1.4s ease-in-out infinite; }
 .seat.folded{ opacity:.45; }
+.seat.kickable{ cursor:pointer; }
+.timer{ display:inline-block; font-size:10.5px; font-weight:800; color:#2a1f03; background:var(--gold); border-radius:6px; padding:1px 5px; margin-left:4px; }
+.pod .timer{ position:absolute; bottom:-8px; left:50%; transform:translateX(-50%); margin:0; }
+.timer.low{ background:var(--danger); color:#fff; animation:blink .8s infinite; }
+.sit-btn{ max-width:130px !important; }
+.settings{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px; }
+.settings label{ display:block; font-size:10.5px; font-weight:700; color:var(--text-dim); letter-spacing:.4px; text-transform:uppercase; margin-bottom:5px; }
+.settings select{ width:100%; padding:10px 8px; font-size:14px; font-weight:600; border-radius:10px; background:rgba(0,0,0,.25); color:var(--text); border:1px solid var(--line-2); font-family:inherit; }
+.settings select:focus{ border-color:var(--gold); outline:none; }
 .seat.away .avatar{ filter:grayscale(1); opacity:.6; }
 .seat.winner .pod{ border-color:var(--gold); box-shadow:0 0 0 3px rgba(224,184,74,.35), 0 0 26px rgba(224,184,74,.6); }
 @keyframes pulse{ 50%{ box-shadow:0 0 0 6px rgba(224,184,74,.12), 0 0 28px rgba(224,184,74,.55); } }
@@ -419,7 +428,12 @@ input[type=range]::-moz-range-thumb{ width:24px; height:24px; border:none; borde
     </div>
 
     <div class="pane on" id="paneHost" role="tabpanel">
-      <p class="pane-note">You'll get a 5-letter room code to share. Keep this page open — your browser runs the table.</p>
+      <div class="settings">
+        <div><label for="setChips">Chips</label><select id="setChips"><option>500</option><option selected>1000</option><option>2000</option><option>5000</option></select></div>
+        <div><label for="setBlinds">Blinds</label><select id="setBlinds"><option>5/10</option><option>10/20</option><option>25/50</option><option>50/100</option></select></div>
+        <div><label for="setTimer">Turn timer</label><select id="setTimer"><option value="0">Off</option><option value="30">30 sec</option><option value="60" selected>60 sec</option><option value="120">2 min</option></select></div>
+      </div>
+      <p class="pane-note">You'll get a 5-letter room code to share. Keep this page open while you play — your browser runs the table.</p>
       <button class="btn btn-gold" id="hostBtn">Host a table</button>
     </div>
     <div class="pane" id="paneJoin" role="tabpanel">
@@ -433,7 +447,7 @@ input[type=range]::-moz-range-thumb{ width:24px; height:24px; border:none; borde
     <div class="lobby-msg" id="lobbyMsg" role="alert"></div>
     <div class="lobby-status"><span class="dot" id="lobbyDot"></span><span id="lobbyStatus">Loading networking…</span></div>
   </div>
-  <div class="lobby-foot">Chips are virtual — just for fun, no real money. Everyone starts with 1,000 chips, blinds 5/10.</div>
+  <div class="lobby-foot">Chips are virtual — just for fun, no real money.</div>
 </section>
 
 <section id="table">
@@ -587,14 +601,17 @@ const BIG_BLIND = 10;
 const MAX_PLAYERS = 9;
 const BETTING_STAGES = ['preflop','flop','turn','river'];
 
-function newTable(code){
+function newTable(code, opts){
+  opts = opts || {};
+  const bb = opts.bigBlind || BIG_BLIND;
   return {
     code, stage:'waiting',
     players: [], deck: [], community: [],
     dealerSeat: -1, turnSeat: -1,
-    currentBet: 0, minRaise: BIG_BLIND,
-    smallBlind: SMALL_BLIND, bigBlind: BIG_BLIND,
-    handNum: 0, log: [], winnerMsg: '', winners: []
+    currentBet: 0, minRaise: bb,
+    smallBlind: opts.smallBlind || SMALL_BLIND, bigBlind: bb,
+    startChips: opts.startChips || START_CHIPS, turnSecs: opts.turnSecs || 0,
+    handNum: 0, log: [], winnerMsg: '', winners: [], ver: 0
   };
 }
 function pushLog(state, line){
@@ -603,7 +620,7 @@ function pushLog(state, line){
 function addPlayer(state, id, name){
   if (state.players.find(p=>p.id===id)) return state;
   state.players.push({
-    id, name, chips: START_CHIPS, bet:0, totalBet:0,
+    id, name, chips: state.startChips || START_CHIPS, bet:0, totalBet:0,
     inHand:false, folded:false, allIn:false, hasActed:false,
     cards:[], away:false, buyIns:1
   });
@@ -614,7 +631,7 @@ function isBetting(state){ return BETTING_STAGES.includes(state.stage); }
 function eligibleSeats(state){
   return state.players.map((p,i)=>i).filter(i=>{
     const p = state.players[i];
-    return !p.away && p.chips>0;
+    return !p.away && !p.sitOut && p.chips>0;
   });
 }
 function seatOrderFrom(state, startSeat, seats){
@@ -871,58 +888,58 @@ function rebuy(state, playerId){
   const p = state.players.find(pl=>pl.id===playerId);
   if (!p) return {ok:false, error:'You are not seated at this table'};
   if (p.chips>0) return {ok:false, error:'You can only rebuy when you are out of chips'};
-  p.chips = START_CHIPS; p.buyIns = (p.buyIns||1)+1;
-  pushLog(state, `${p.name} rebuys for ${START_CHIPS}`);
+  p.chips = state.startChips || START_CHIPS; p.buyIns = (p.buyIns||1)+1;
+  pushLog(state, `${p.name} rebuys for ${p.chips}`);
   return {ok:true, state};
 }
 /* ENGINE END */
 
 /* =========================================================
-   NETWORKING — peer-to-peer via PeerJS (free public broker,
-   no account or server needed). One browser tab is "the host"
-   and holds the authoritative game state; everyone else sends
-   requests to the host and renders the view the host sends.
+   NETWORKING — messages travel through free public MQTT relays over
+   secure WebSockets, so it works on any network where normal websites
+   work (no peer-to-peer, no accounts, no server of our own).
+   The host's browser is still the referee: it keeps the real game state
+   and everyone else sends it requests. We connect to two relays at once
+   and send everything through both, so one being down doesn't matter.
+   Messages are encrypted with a key derived from the room code, and
+   topic names are hashed, so strangers on the relay can't read the game.
    ========================================================= */
-// Namespaces our room ids on the shared PeerJS broker so a 5-letter code
-// can't collide with some other app's peer.
-const PEER_PREFIX = 'feltfortune-v2-';
-// PeerJS's own defaults (Google STUN + PeerJS's free TURN relay) plus a second
-// STUN server. The TURN relay is what lets phones on different networks
-// (e.g. mobile data vs. home Wi-Fi) reach each other.
-// If you have your own TURN server (e.g. a free metered.ca or Cloudflare
-// account), add it to this list for the most reliable connections.
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
-];
-const PEER_OPTS = { debug: 1, config: { iceServers: ICE_SERVERS, sdpSemantics: 'unified-plan' } };
+const RELAYS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+const HEARTBEAT_MS = 4000;
+const LOST_AFTER_MS = 16000;   // no message for this long = disconnected
+const JOIN_TIMEOUT_MS = 15000;
+const RELAY_TIMEOUT_MS = 12000;
 
 const store = {
   get(k, session){ try{ return (session?sessionStorage:localStorage).getItem(k); }catch(e){ return null; } },
   set(k, v, session){ try{ (session?sessionStorage:localStorage).setItem(k, v); }catch(e){} },
   del(k, session){ try{ (session?sessionStorage:localStorage).removeItem(k); }catch(e){} },
-  json(k){ try{ return JSON.parse(this.get(k)); }catch(e){ return null; } }
+  json(k, session){ try{ return JSON.parse(this.get(k, session)); }catch(e){ return null; } }
 };
 function uid(){
-  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-  return 'p_'+Math.random().toString(36).slice(2)+Date.now().toString(36);
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g,'');
+  return 'p'+Math.random().toString(36).slice(2)+Date.now().toString(36);
 }
 // Player id is per browser tab (sessionStorage), so two tabs in one browser
 // are two different players, and a reload keeps your seat.
 let myId = store.get('ff_pid', true) || uid();
 store.set('ff_pid', myId, true);
 
-let peer = null;
-let hostConn = null;       // client: our connection to the host
-let peerConns = {};        // host: playerId -> DataConnection
+let net = null;            // {key, base, clients, closed}
 let isHost = false;
 let currentCode = null;
 let myName = '';
 let latestState = null;    // host: full state; client: our view of it
 let leaving = false;
-let retryCount = 0, retryTimer = null;
-let joinAttempt = 0;
+let turnDeadline = 0;      // local clock ms when the current turn times out (0 = no timer)
+
+// host
+let hostSession = null, hostStartedAt = 0;
+let roster = {};           // pid -> {inbox, lastSeen}
+let hostTurnKey = '', lastTick = 0, lastHb = 0;
+// client
+let myInbox = null, joinedOnce = false, joinTimer = null;
+let hostLastSeen = 0, lastPing = 0, knownHostSession = null;
 
 const el = (id)=>document.getElementById(id);
 function clone(x){ return JSON.parse(JSON.stringify(x)); }
@@ -942,8 +959,8 @@ function setLobbyMsg(msg, info){ const m = el('lobbyMsg'); m.textContent = msg||
 function setLobbyStatus(msg, dot){ el('lobbyStatus').textContent = msg; el('lobbyDot').className = 'dot '+(dot||''); }
 function setBusy(btn, busy, label){
   btn.disabled = busy;
-  if (busy){ btn.dataset.label = btn.textContent; btn.innerHTML = `<span class="spinner"></span>${label}`; }
-  else if (btn.dataset.label){ btn.textContent = btn.dataset.label; }
+  if (busy){ if (!btn.dataset.label) btn.dataset.label = btn.textContent; btn.innerHTML = `<span class="spinner"></span>${label}`; }
+  else if (btn.dataset.label){ btn.textContent = btn.dataset.label; delete btn.dataset.label; }
 }
 function resetLobbyButtons(){ setBusy(el('hostBtn'), false); setBusy(el('joinBtn'), false); setBusy(el('resumeBtn'), false); }
 
@@ -959,20 +976,106 @@ function saveHostSnapshot(){
 }
 function clearHostSnapshot(){ store.del('ff_host_save'); }
 
+/* ---------- encrypted relay transport ---------- */
+const te = new TextEncoder(), td = new TextDecoder();
+async function sha256hex(str){
+  const h = await crypto.subtle.digest('SHA-256', te.encode(str));
+  return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function roomKey(code){
+  const base = await crypto.subtle.importKey('raw', te.encode('room:'+code), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2', salt:te.encode('felt-and-fortune-v3'), iterations:100000, hash:'SHA-256'},
+    base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+}
+async function seal(key, obj){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, te.encode(JSON.stringify(obj))));
+  const out = new Uint8Array(12+ct.length); out.set(iv); out.set(ct, 12);
+  return out;
+}
+async function unseal(key, bytes){
+  const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:u.slice(0,12)}, key, u.slice(12));
+  return JSON.parse(td.decode(pt));
+}
+const seenMids = new Set();
+function markSeen(mid){
+  seenMids.add(mid);
+  if (seenMids.size > 3000){ const it = seenMids.values(); for (let i=0;i<1000;i++) seenMids.delete(it.next().value); }
+}
+async function netOpen(code, subTopics, onMessage){
+  netClose();
+  const n = {closed:false, clients:[]};
+  net = n;
+  n.key = await roomKey(code);
+  n.base = 'feltfortune/v3/' + (await sha256hex('room:'+code)).slice(0,32);
+  if (n.closed) return n;
+  const subs = subTopics(n.base);
+  RELAYS.forEach(url=>{
+    const c = mqtt.connect(url, {
+      clientId: 'ff_'+uid().slice(0,20), clean:true, keepalive:30,
+      reconnectPeriod:2500, connectTimeout:10000, resubscribe:true
+    });
+    c.on('connect', ()=>{ c.subscribe(subs, {qos:1}); updateNetStatus(); });
+    c.on('message', async (topic, payload)=>{
+      if (n.closed) return;
+      let msg;
+      try{ msg = await unseal(n.key, payload); }catch(e){ return; }   // not ours / wrong room
+      if (!msg || typeof msg!=='object' || !msg.mid || seenMids.has(msg.mid)) return;
+      markSeen(msg.mid);
+      try{ onMessage(topic.slice(n.base.length), msg); }catch(e){ console.error(e); }
+    });
+    ['close','offline','error','reconnect'].forEach(ev=>c.on(ev, updateNetStatus));
+    n.clients.push(c);
+  });
+  return n;
+}
+function relaysUp(){ return net ? net.clients.filter(c=>c.connected).length : 0; }
+function waitForRelay(ms){
+  return new Promise(res=>{
+    const t0 = Date.now();
+    const iv = setInterval(()=>{
+      if (relaysUp()>0){ clearInterval(iv); res(true); }
+      else if (Date.now()-t0 > ms || !net){ clearInterval(iv); res(false); }
+    }, 150);
+  });
+}
+async function netSend(sub, obj){
+  const n = net;
+  if (!n || n.closed || !n.key) return false;
+  obj.mid = uid();
+  markSeen(obj.mid); // ignore our own echo
+  const bytes = await seal(n.key, obj);
+  let sent = false;
+  n.clients.forEach(c=>{ if (c.connected){ c.publish(n.base+sub, bytes, {qos:1}); sent = true; } });
+  return sent;
+}
+function netClose(){
+  if (!net) return;
+  net.closed = true;
+  net.clients.forEach(c=>{ try{ c.end(true); }catch(e){} });
+  net = null;
+}
+
 /* ---------- host-side logic ---------- */
-// What one player is allowed to see: no deck, and nobody else's hole cards
-// unless they were shown down.
+// What one player is allowed to see: no deck, nobody else's hole cards
+// until they're shown down, and nobody else's private player id (so it
+// can't be used to send moves in their name).
 function viewFor(pid, s){
   const v = clone(s);
   delete v.deck;
-  v.players.forEach(p=>{ if (p.id!==pid && !p.revealedHand) p.cards = p.cards.map(()=> 'XX'); });
+  const alias = {};
+  v.players.forEach((p,i)=>{
+    if (p.id!==pid){ alias[p.id] = 'seat'+i; p.id = 'seat'+i; if (!p.revealedHand) p.cards = p.cards.map(()=> 'XX'); }
+  });
+  v.winners = (v.winners||[]).map(id=> alias[id] || id);
   return v;
 }
-// Players who disconnected check when they can and fold when they can't, so
-// the table never waits on someone who's gone.
+// Players who are away or sitting out check when they can and fold when
+// they can't, so the table never waits on them.
 function autoActAway(s){
   let guard = 0;
-  while (isBetting(s) && s.turnSeat>=0 && s.players[s.turnSeat] && s.players[s.turnSeat].away && guard++ < 50){
+  while (isBetting(s) && s.turnSeat>=0 && s.players[s.turnSeat] && (s.players[s.turnSeat].away || s.players[s.turnSeat].sitOut) && guard++ < 50){
     const p = s.players[s.turnSeat];
     const r = applyAction(s, p.id, (s.currentBet - p.bet) > 0 ? 'fold' : 'check');
     if (!r.ok) break;
@@ -980,17 +1083,29 @@ function autoActAway(s){
   }
   return s;
 }
+function turnLeftMs(){ return turnDeadline ? Math.max(0, turnDeadline - Date.now()) : null; }
+function sendStateTo(pid){
+  const r = roster[pid];
+  if (!r || !latestState) return;
+  netSend('/p/'+r.inbox, {t:'state', session:hostSession, state:viewFor(pid, latestState), turnLeft:turnLeftMs()});
+}
 function commit(s){
-  latestState = autoActAway(s);
+  s = autoActAway(s);
+  s.ver = (s.ver||0) + 1;
+  latestState = s;
+  // Restart the turn clock whenever the turn moves to someone new.
+  const key = isBetting(s) ? `${s.handNum}:${s.stage}:${s.turnSeat}:${s.log.length}` : '';
+  if (key!==hostTurnKey){
+    hostTurnKey = key;
+    turnDeadline = key && s.turnSecs ? Date.now() + s.turnSecs*1000 : 0;
+  }
   saveHostSnapshot();
-  Object.entries(peerConns).forEach(([pid, c])=>{
-    try{ if (c.open) c.send({type:'state', state: viewFor(pid, latestState)}); }catch(e){}
-  });
+  Object.keys(roster).forEach(sendStateTo);
   render();
 }
 function replyError(pid, message){
   if (pid===myId) toast(message, 'error');
-  else { const c = peerConns[pid]; try{ if (c && c.open) c.send({type:'error', message}); }catch(e){} }
+  else if (roster[pid]) netSend('/p/'+roster[pid].inbox, {t:'error', message});
 }
 function pruneLeft(s){
   if (isBetting(s)) return;
@@ -999,213 +1114,250 @@ function pruneLeft(s){
   s.players = s.players.filter(p=>!p.left);
 }
 function hostDispatch(pid, data){
+  if (!latestState) return;
   let s = clone(latestState), r;
-  if (data.type==='start'){
+  const p = s.players.find(pl=>pl.id===pid);
+  if (data.t==='start'){
     pruneLeft(s); // drop players who left mid-hand before dealing the next one
     r = startHand(s);
-  } else if (data.type==='action'){
+  } else if (data.t==='action'){
     r = applyAction(s, pid, data.action, data.amount);
-    if (r.ok) r.state = advanceAfterAction(r.state);
-  } else if (data.type==='rebuy'){
+    if (r.ok){ if (p) p.timeouts = 0; r.state = advanceAfterAction(r.state); }
+  } else if (data.t==='rebuy'){
     r = rebuy(s, pid);
-  } else if (data.type==='leave'){
-    const p = s.players.find(pl=>pl.id===pid);
+  } else if (data.t==='sitout' || data.t==='back'){
     if (!p) return;
-    p.away = true; p.left = true;
-    pushLog(s, p.name+' left the table');
+    p.sitOut = data.t==='sitout'; p.timeouts = 0;
+    pushLog(s, p.name + (p.sitOut ? ' is sitting out' : ' is back in'));
+    r = {ok:true, state:s};
+  } else if (data.t==='leave' || data.t==='kick'){
+    const target = data.t==='kick' ? s.players.find(pl=>pl.id===data.target) : p;
+    if (!target || target.id===myId && data.t==='kick') return;
+    target.away = true; target.left = true;
+    pushLog(s, target.name + (data.t==='kick' ? ' was removed by the host' : ' left the table'));
+    if (data.t==='kick' && roster[target.id]) netSend('/p/'+roster[target.id].inbox, {t:'kicked'});
+    delete roster[target.id];
     pruneLeft(s);
     r = {ok:true, state:s};
   } else return;
   if (!r.ok){ replyError(pid, r.error); return; }
   commit(r.state);
 }
-function handleHostMessage(conn, data){
-  if (!data || typeof data!=='object' || !latestState) return;
-  if (data.type==='join'){
-    const pid = String(data.id || conn.peer).slice(0,64);
-    const name = cleanName(data.name);
-    const old = peerConns[pid];
-    conn._pid = pid;
-    peerConns[pid] = conn;
-    if (old && old!==conn){ try{ old.close(); }catch(e){} }
+function hostOnMessage(sub, msg){
+  if (sub==='/all'){
+    // Someone opened this same table more recently (e.g. on another device).
+    if (msg.t==='host' && msg.session!==hostSession && msg.at > hostStartedAt){
+      toast('This table was reopened on another device or tab', 'error');
+      isHost = false; netClose(); backToLobby();
+    }
+    return;
+  }
+  if (sub!=='/h' || !latestState) return;
+  const pid = typeof msg.from==='string' ? msg.from.slice(0,64) : null;
+  if (!pid || pid===myId) return;
+  const inbox = typeof msg.inbox==='string' ? msg.inbox.replace(/[^a-z0-9]/gi,'').slice(0,64) : null;
+  const now = Date.now();
+  const seated = latestState.players.find(p=>p.id===pid);
+
+  if (msg.t==='join' || (msg.t==='ping' && seated && inbox)){
+    if (!inbox) return;
+    roster[pid] = {inbox, lastSeen: now};
     let s = clone(latestState);
     const existing = s.players.find(p=>p.id===pid);
     if (existing){
-      if (existing.away) pushLog(s, name+' is back');
-      existing.away = false; existing.left = false; existing.name = name;
-    } else {
-      if (s.players.length >= MAX_PLAYERS){
-        try{ conn.send({type:'rejected', message:`Table ${currentCode} is full (${MAX_PLAYERS} players).`}); }catch(e){}
-        delete peerConns[pid];
-        setTimeout(()=>{ try{ conn.close(); }catch(e){} }, 500);
+      if (!existing.away && msg.t==='ping'){
+        // Normal heartbeat: only resend state if they missed an update.
+        if (msg.ver!==latestState.ver) sendStateTo(pid);
         return;
       }
-      s = addPlayer(s, pid, name);
-      toast(name+' joined the table', 'ok');
+      if (existing.away) pushLog(s, existing.name+' is back');
+      existing.away = false;
+      if (msg.t==='join') existing.name = cleanName(msg.name);
+    } else {
+      if (s.players.length >= MAX_PLAYERS){
+        netSend('/p/'+inbox, {t:'rejected', message:`Table ${currentCode} is full (${MAX_PLAYERS} players).`});
+        delete roster[pid];
+        return;
+      }
+      s = addPlayer(s, pid, cleanName(msg.name));
+      toast(cleanName(msg.name)+' joined the table', 'ok');
     }
     commit(s);
     return;
   }
-  if (conn._pid) hostDispatch(conn._pid, data);
+  if (!roster[pid]) return;  // not joined (yet)
+  roster[pid].lastSeen = now;
+  if (msg.t==='sync') sendStateTo(pid);
+  else if (msg.t==='kick') return;   // only the host can remove players
+  else hostDispatch(pid, msg);
 }
-function handleConnGone(conn){
-  const pid = conn._pid;
-  if (!pid || peerConns[pid]!==conn) return; // stale connection that was already replaced
-  delete peerConns[pid];
-  if (!latestState) return;
-  const s = clone(latestState);
-  const p = s.players.find(pl=>pl.id===pid);
-  if (!p) return;
-  if (!p.left){ p.away = true; pushLog(s, p.name+' lost connection'); }
-  commit(s);
+function hostTickLoop(){
+  if (!isHost || !latestState) return;
+  const now = Date.now();
+  // If this tab was asleep (phone screen off, tab in background) or offline,
+  // we missed everyone's heartbeats; give them a fresh grace period.
+  if (now - lastTick > 5000 || relaysUp()===0) Object.values(roster).forEach(r=> r.lastSeen = now);
+  lastTick = now;
+  if (now - lastHb >= HEARTBEAT_MS && relaysUp()>0){
+    lastHb = now;
+    netSend('/all', {t:'hb', session:hostSession, at:hostStartedAt, ver:latestState.ver});
+    netSend('/all', {t:'host', session:hostSession, at:hostStartedAt});
+  }
+  let s = null;
+  latestState.players.forEach(p=>{
+    const r = roster[p.id];
+    if (p.id!==myId && !p.away && (!r || now - r.lastSeen > LOST_AFTER_MS)){
+      s = s || clone(latestState);
+      const q = s.players.find(x=>x.id===p.id);
+      q.away = true; pushLog(s, q.name+' lost connection');
+    }
+  });
+  if (s){ commit(s); return; }
+  // Turn timer: act for a player who runs out of time. Two timeouts in a
+  // row sits them out until they tap "I'm back".
+  if (turnDeadline && now > turnDeadline && isBetting(latestState)){
+    const st = clone(latestState);
+    const p = st.players[st.turnSeat];
+    pushLog(st, `${p.name} ran out of time`);
+    const r = applyAction(st, p.id, (st.currentBet - p.bet) > 0 ? 'fold' : 'check');
+    if (r.ok){
+      p.timeouts = (p.timeouts||0) + 1;
+      if (p.timeouts >= 2){ p.sitOut = true; pushLog(r.state, p.name+' is sitting out'); }
+      turnDeadline = 0;
+      commit(advanceAfterAction(r.state));
+    }
+  }
 }
-function onHostConnection(conn){
-  conn.on('data', data=> handleHostMessage(conn, data));
-  conn.on('close', ()=> handleConnGone(conn));
-  conn.on('error', ()=> handleConnGone(conn));
+async function startHosting(code, state){
+  hostSession = uid(); hostStartedAt = Date.now();
+  roster = {}; hostTurnKey = ''; lastTick = Date.now(); lastHb = 0;
+  latestState = state;
+  currentCode = code;
+  await netOpen(code, base=>[base+'/h', base+'/all'], hostOnMessage);
+  if (!await waitForRelay(RELAY_TIMEOUT_MS)){ netClose(); return false; }
+  return true;
 }
-function startHostPeer(code, opts){
-  let tries = 0;
-  const attempt = (c)=>{
-    const p = new Peer(PEER_PREFIX+c, PEER_OPTS);
-    let opened = false;
-    const slow = setTimeout(()=> setLobbyStatus('Still connecting to the matchmaking server…', 'warn'), 8000);
-    p.on('open', ()=>{
-      clearTimeout(slow);
-      updateNetStatus();
-      if (opened) return; // re-registered after a broker reconnect
-      opened = true; peer = p; opts.onReady(c);
-    });
-    p.on('connection', onHostConnection);
-    p.on('disconnected', updateNetStatus);
-    p.on('error', err=>{
-      clearTimeout(slow);
-      console.warn('[host] peer error', err.type, err);
-      if (opened){ updateNetStatus(); return; }
-      try{ p.destroy(); }catch(e){}
-      if (err.type==='unavailable-id' && tries++ < 6){
-        // A fresh table just picks another code. A resumed table waits for the
-        // broker to release the old id (takes a few seconds after a reload).
-        if (opts.sameCode){ setLobbyStatus('Reclaiming table '+c+'…', 'warn'); setTimeout(()=>attempt(c), 2500); }
-        else attempt(randomCode());
-        return;
-      }
-      opts.onFail(err);
-    });
-  };
-  attempt(code);
-}
-// Mobile browsers drop the broker connection when the tab is backgrounded
-// (e.g. switching to WhatsApp to share the code). While disconnected, nobody
-// new can find the table, so re-register as soon as we can.
-setInterval(()=>{ if (isHost && peer && peer.disconnected && !peer.destroyed){ try{ peer.reconnect(); }catch(e){} } updateNetStatus(); }, 4000);
-document.addEventListener('visibilitychange', ()=>{
-  if (document.visibilityState!=='visible' || !currentCode || leaving) return;
-  if (isHost && peer && peer.disconnected && !peer.destroyed){ try{ peer.reconnect(); }catch(e){} }
-  if (!isHost && !(hostConn && hostConn.open) && !retryTimer){ retryCount = 0; connectToHost(currentCode, myName, true); }
-});
 
 /* ---------- client logic ---------- */
-function teardownClient(){
-  joinAttempt++; // stale handlers from the old connection ignore what happens next
-  if (hostConn){ try{ hostConn.close(); }catch(e){} }
-  hostConn = null;
-  if (peer){ try{ peer.destroy(); }catch(e){} }
-  peer = null;
+async function startClient(code, name){
+  myInbox = uid();
+  joinedOnce = false; knownHostSession = null; hostLastSeen = 0;
+  currentCode = code; myName = name; latestState = null;
+  await netOpen(code, base=>[base+'/p/'+myInbox, base+'/all'], clientOnMessage);
+  if (!await waitForRelay(RELAY_TIMEOUT_MS)){
+    netClose();
+    return failJoin("Can't reach the game servers. Check your internet connection and try again.");
+  }
+  sendJoin();
+  clearTimeout(joinTimer);
+  joinTimer = setTimeout(()=>{
+    if (!joinedOnce) failJoin(`No table "${code}" is open right now. Check the code, and ask the host to keep the game open on their screen.`);
+  }, JOIN_TIMEOUT_MS);
+  // The host may have just missed the first message; ask again a few times.
+  [3000, 7000, 11000].forEach(ms=> setTimeout(()=>{ if (!joinedOnce && net) sendJoin(); }, ms));
 }
-function connectToHost(code, name, reconnecting){
-  teardownClient();
-  const attemptId = ++joinAttempt;
-  const p = new Peer(PEER_OPTS); // random id from the broker: no clashes between tabs or after reloads
-  peer = p;
-  let settled = false;
-  const finish = (ok, msg)=>{
-    if (settled || attemptId!==joinAttempt) return;
-    settled = true; clearTimeout(failTimer);
-    if (ok) return onJoined(code);
-    try{ p.destroy(); }catch(e){}
-    onJoinFailed(msg, reconnecting);
-  };
-  const failTimer = setTimeout(()=> finish(false,
-    `Couldn't reach table ${code}. Check the code, and make sure the host still has the page open on their screen.`), 20000);
-  p.on('open', ()=>{
-    if (hostConn) return;
-    const conn = p.connect(PEER_PREFIX+code, {reliable:true});
-    hostConn = conn;
-    conn.on('open', ()=>{ conn.send({type:'join', id:myId, name}); });
-    conn.on('data', data=>{
-      if (!data || attemptId!==joinAttempt) return;
-      if (data.type==='state'){
-        latestState = data.state;
-        if (!settled) finish(true); else render();
-      } else if (data.type==='error'){ toast(data.message, 'error'); }
-      else if (data.type==='rejected'){ finish(false, data.message); }
-      else if (data.type==='closed'){ leaving = true; toast('The host closed the table', 'info'); backToLobby(); }
-    });
-    const lost = ()=>{ if (attemptId!==joinAttempt) return; if (!settled) finish(false, 'The table closed the connection. Try again.'); else onHostLost(); };
-    conn.on('close', lost);
-    conn.on('error', lost);
-  });
-  p.on('error', err=>{
-    console.warn('[client] peer error', err.type, err);
-    if (attemptId!==joinAttempt) return;
-    if (!settled){
-      finish(false, err.type==='peer-unavailable'
-        ? `No table "${code}" is online right now. Check the code, and make sure the host still has the page open.`
-        : err.type==='browser-incompatible' ? 'This browser does not support WebRTC. Try Chrome, Safari or Firefox.'
-        : `Connection problem (${err.type}). Please try again.`);
-    } else if (!(hostConn && hostConn.open)) onHostLost();
-  });
-}
-function onJoined(code){
-  retryCount = 0; clearTimeout(retryTimer); retryTimer = null;
-  hideConnBar();
-  if (el('table').style.display!=='flex') enterTable(code, false);
-  else { toast('Reconnected', 'ok'); render(); }
-  updateNetStatus();
-}
-function onJoinFailed(msg, reconnecting){
-  if (reconnecting && !leaving){ scheduleClientReconnect(); return; }
+function sendJoin(){ netSend('/h', {t:'join', from:myId, name:myName, inbox:myInbox}); }
+function failJoin(msg){
+  clearTimeout(joinTimer);
+  netClose();
+  currentCode = null;
   setLobbyMsg(msg);
   setLobbyStatus('Ready', 'ok');
   resetLobbyButtons();
+  store.del('ff_seat', true);
 }
-function onHostLost(){
-  if (leaving || isHost) return;
-  updateNetStatus();
-  if (!retryTimer) scheduleClientReconnect();
-}
-function scheduleClientReconnect(){
-  clearTimeout(retryTimer); retryTimer = null;
-  if (retryCount >= 12){
-    showConnBar("Can't reach the host. Ask them to open the page again, then tap Retry.", false);
+function clientOnMessage(sub, msg){
+  if (isHost) return;
+  const now = Date.now();
+  if (msg.t==='state' && sub.startsWith('/p/')){
+    hostLastSeen = now;
+    const st = msg.state;
+    if (!st || !Array.isArray(st.players)) return;
+    // Ignore an older (or repeated) state that arrived through the slower relay.
+    if (latestState && joinedOnce && msg.session===knownHostSession && (st.ver||0) <= (latestState.ver||0)) return;
+    knownHostSession = msg.session;
+    latestState = st;
+    turnDeadline = msg.turnLeft==null ? 0 : now + msg.turnLeft;
+    if (!joinedOnce){
+      joinedOnce = true; clearTimeout(joinTimer);
+      resetLobbyButtons();
+      enterTable(currentCode, false);
+    } else render();
+    updateNetStatus();
     return;
   }
-  showConnBar('Lost connection to the host — reconnecting…', true);
-  const delay = Math.min(1500 * (retryCount+1), 8000);
-  retryTimer = setTimeout(()=>{ retryTimer = null; retryCount++; connectToHost(currentCode, myName, true); }, delay);
+  if (msg.t==='error'){ toast(msg.message, 'error'); return; }
+  if (msg.t==='rejected'){ if (!joinedOnce) failJoin(msg.message); return; }
+  if (msg.t==='kicked'){ leaving = true; toast('The host removed you from the table', 'info'); netClose(); backToLobby(); return; }
+  if (sub==='/all'){
+    if (msg.t==='closed' && joinedOnce){ leaving = true; toast('The host closed the table', 'info'); netClose(); backToLobby(); return; }
+    if (msg.t==='hb'){
+      hostLastSeen = now;
+      if (joinedOnce && latestState && (msg.session!==knownHostSession || msg.ver!==latestState.ver)) sendPing(true);
+      updateNetStatus();
+    }
+  }
 }
+function sendPing(force){
+  lastPing = Date.now();
+  netSend('/h', {t: force ? 'sync' : 'ping', from:myId, name:myName, inbox:myInbox, ver: latestState && latestState.ver});
+  if (force) netSend('/h', {t:'ping', from:myId, name:myName, inbox:myInbox, ver: -1});
+}
+function clientTickLoop(){
+  if (isHost || !joinedOnce || !net) return;
+  const now = Date.now();
+  if (now - lastPing >= HEARTBEAT_MS && relaysUp()>0) sendPing(false);
+  updateNetStatus();
+}
+setInterval(()=>{ hostTickLoop(); clientTickLoop(); updateTimers(); }, 500);
+document.addEventListener('visibilitychange', ()=>{
+  if (document.visibilityState!=='visible' || !currentCode) return;
+  if (isHost) lastTick = 0;            // forces the grace period above
+  else if (joinedOnce){ hostLastSeen = Date.now(); sendPing(true); }
+});
+
 function showConnBar(msg, spinning){ el('connMsg').textContent = msg; el('connSpin').style.display = spinning ? '' : 'none'; el('connBar').classList.add('show'); }
 function hideConnBar(){ el('connBar').classList.remove('show'); }
 function updateNetStatus(){
-  const d = el('netDot'); if (!d) return;
-  let cls = 'bad', title = 'Offline';
-  if (isHost && peer){
-    if (!peer.disconnected){ cls='ok'; title='Online — friends can join'; } else { cls='warn'; title='Reconnecting so friends can find the table…'; }
-  } else if (hostConn && hostConn.open){ cls='ok'; title='Connected to host'; }
-  else if (retryTimer || retryCount){ cls='warn'; title='Reconnecting…'; }
-  d.className = 'dot '+cls; el('roomChip').title = title + ' · tap to copy invite';
+  if (!currentCode || el('table').style.display!=='flex') return;
+  const up = relaysUp();
+  let cls = 'ok', title = isHost ? 'Online — friends can join' : 'Connected to host';
+  if (!net || up===0){ cls = 'warn'; title = 'Reconnecting to the game server…'; showConnBar("Reconnecting to the game server… check your internet connection.", true); }
+  else if (!isHost && Date.now() - hostLastSeen > LOST_AFTER_MS){
+    cls = 'bad'; title = 'Host not responding';
+    showConnBar("The host isn't responding. Ask them to open the game again — you'll reconnect automatically.", true);
+  } else hideConnBar();
+  el('netDot').className = 'dot '+cls;
+  el('roomChip').title = title + ' · tap to copy invite';
 }
 
 /* ---------- requests from the UI ---------- */
 function send(msg){
-  if (isHost) hostDispatch(myId, msg);
-  else if (hostConn && hostConn.open) hostConn.send(msg);
-  else toast('Not connected to the host yet', 'error');
+  if (isHost){ hostDispatch(myId, msg); return; }
+  if (!relaysUp()){ toast('Not connected — reconnecting…', 'error'); return; }
+  msg.from = myId;
+  netSend('/h', msg);
 }
-function requestStart(){ send({type:'start'}); }
-function requestAction(type, amount){ raiseUI = null; send({type:'action', action:type, amount}); }
-function requestRebuy(){ send({type:'rebuy'}); }
+function requestStart(){ send({t:'start'}); }
+// After you act, the buttons stay locked until the host's next update
+// arrives, so a double tap can't send the move twice.
+let pendingVer = null, pendingTimer = null;
+function requestAction(type, amount){
+  raiseUI = null;
+  if (!isHost){
+    pendingVer = latestState && latestState.ver;
+    clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(()=>{ pendingVer = null; render(); }, 5000);
+  }
+  send({t:'action', action:type, amount});
+  if (!isHost) render();
+}
+function requestRebuy(){ send({t:'rebuy'}); }
+function requestSitOut(on){ send({t: on ? 'sitout' : 'back'}); }
+function hostKick(pid, name){
+  if (!isHost || isBetting(latestState)) return;
+  if (confirm(`Remove ${name} from the table?`)) hostDispatch(myId, {t:'kick', target:pid});
+}
 
 /* ---------- lobby actions ---------- */
 function readName(){
@@ -1213,107 +1365,106 @@ function readName(){
   if (!el('nameInput').value.trim()){ setLobbyMsg('Enter your name first'); el('nameInput').focus(); return null; }
   return name;
 }
-function hostTable(){
-  setLobbyMsg('');
-  const name = readName(); if (!name) return;
-  if (typeof Peer==='undefined'){ setLobbyMsg('Networking library failed to load. Check your connection and reload.'); return; }
-  setBusy(el('hostBtn'), true, 'Opening table…');
-  isHost = true; leaving = false; myName = name; peerConns = {};
-  store.set('felt_fortune_name', name);
-  startHostPeer(randomCode(), {
-    onReady(code){
-      currentCode = code;
-      latestState = addPlayer(newTable(code), myId, name);
-      saveHostSnapshot();
-      resetLobbyButtons();
-      enterTable(code, true);
-    },
-    onFail(err){
-      isHost = false;
-      setLobbyMsg(`Couldn't open a table (${err.type}). Check your internet connection and try again.`);
-      setLobbyStatus('Ready', 'ok');
-      resetLobbyButtons();
-    }
-  });
+function libOk(){
+  if (window.mqtt && window.crypto && crypto.subtle) return true;
+  setLobbyMsg(!window.mqtt ? 'The game could not load its networking code. Check your connection and reload the page.'
+    : 'This page must be opened over https:// to play online.');
+  return false;
 }
-function resumeHosting(){
+function readSettings(){
+  const v = id=> Number(el(id).value);
+  const [sb, bb] = el('setBlinds').value.split('/').map(Number);
+  const opts = {startChips: v('setChips'), smallBlind: sb, bigBlind: bb, turnSecs: v('setTimer')};
+  store.set('ff_settings', JSON.stringify(opts));
+  return opts;
+}
+async function hostTable(){
+  setLobbyMsg('');
+  const name = readName(); if (!name || !libOk()) return;
+  setBusy(el('hostBtn'), true, 'Opening table…');
+  setLobbyStatus('Connecting to the game server…', 'warn');
+  isHost = true; leaving = false; myName = name;
+  store.set('felt_fortune_name', name);
+  const code = randomCode();
+  const state = addPlayer(newTable(code, readSettings()), myId, name);
+  if (!await startHosting(code, state)){
+    isHost = false; currentCode = null; latestState = null;
+    setLobbyMsg("Couldn't reach the game servers. Check your internet connection and try again.");
+    setLobbyStatus('Ready', 'ok'); resetLobbyButtons();
+    return;
+  }
+  resetLobbyButtons();
+  enterTable(code, true);
+  commit(latestState);
+}
+async function resumeHosting(){
   setLobbyMsg('');
   const saved = store.json('ff_host_save');
   if (!saved || !saved.state){ setLobbyMsg('Nothing to resume'); return; }
-  if (typeof Peer==='undefined'){ setLobbyMsg('Networking library failed to load. Check your connection and reload.'); return; }
+  if (!libOk()) return;
   setBusy(el('resumeBtn'), true, 'Reopening…');
-  isHost = true; leaving = false; peerConns = {};
+  isHost = true; leaving = false;
   myId = saved.hostId || myId; store.set('ff_pid', myId, true);
   myName = saved.name || cleanName(el('nameInput').value);
-  startHostPeer(saved.code, {
-    sameCode: true,
-    onReady(code){
-      currentCode = code;
-      const s = saved.state;
-      // Everyone else has to reconnect; their pages retry automatically.
-      s.players.forEach(p=>{ if (p.id!==myId) p.away = true; });
-      pushLog(s, 'Table reopened by the host');
-      latestState = autoActAway(s);
-      saveHostSnapshot();
-      resetLobbyButtons();
-      enterTable(code, true);
-    },
-    onFail(err){
-      isHost = false;
-      setLobbyMsg(err.type==='unavailable-id'
-        ? `Table ${saved.code} still looks open in another tab or device. Close it there, wait a few seconds, and try again.`
-        : `Couldn't reopen the table (${err.type}). Try again.`);
-      resetLobbyButtons();
-    }
-  });
+  const s = saved.state;
+  // Everyone else counts as away until their page checks in again (automatic).
+  s.players.forEach(p=>{ if (p.id!==myId) p.away = true; });
+  pushLog(s, 'Table reopened by the host');
+  if (!await startHosting(saved.code, s)){
+    isHost = false; currentCode = null; latestState = null;
+    setLobbyMsg("Couldn't reach the game servers. Check your internet connection and try again.");
+    resetLobbyButtons();
+    return;
+  }
+  resetLobbyButtons();
+  enterTable(saved.code, true);
+  commit(latestState);
 }
-function joinTable(){
+async function joinTable(){
   setLobbyMsg('');
   const name = readName(); if (!name) return;
   const code = el('codeInput').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
   if (code.length!==5){ setLobbyMsg('Room codes are 5 letters/numbers'); el('codeInput').focus(); return; }
-  if (typeof Peer==='undefined'){ setLobbyMsg('Networking library failed to load. Check your connection and reload.'); return; }
+  if (!libOk()) return;
   setBusy(el('joinBtn'), true, 'Joining…');
   setLobbyStatus('Looking for table '+code+'…', 'warn');
-  isHost = false; leaving = false; myName = name; retryCount = 0;
+  isHost = false; leaving = false;
   store.set('felt_fortune_name', name);
   store.set('ff_seat', JSON.stringify({code, name}), true);
-  currentCode = code;
-  connectToHost(code, name, false);
+  await startClient(code, name);
 }
 function manualReconnect(){
   if (!currentCode) return;
-  retryCount = 0; clearTimeout(retryTimer); retryTimer = null;
-  showConnBar('Reconnecting…', true);
-  connectToHost(currentCode, myName, true);
+  if (isHost){ toast('Reconnecting…'); netClose(); startHosting(currentCode, latestState).then(ok=>{ if (ok) commit(latestState); }); }
+  else { hostLastSeen = Date.now(); sendPing(true); toast('Checking in with the host…'); }
 }
 function leaveTable(){
   if (isHost){
     const others = latestState ? latestState.players.filter(p=>p.id!==myId && !p.away).length : 0;
     if (others && !confirm('Close this table for everyone? Your friends will be disconnected.')) return;
-    Object.values(peerConns).forEach(c=>{ try{ c.send({type:'closed'}); }catch(e){} });
+    netSend('/all', {t:'closed'});
     clearHostSnapshot();
-    leaving = true;
-    setTimeout(()=>{ if (peer){ try{ peer.destroy(); }catch(e){} } peer = null; }, 300);
   } else {
     if (!confirm('Leave this table?')) return;
-    leaving = true;
-    try{ if (hostConn && hostConn.open) hostConn.send({type:'leave'}); }catch(e){}
-    setTimeout(teardownClient, 300);
+    send({t:'leave'});
   }
+  leaving = true;
+  const n = net; net = null;
+  setTimeout(()=>{ if (n){ n.closed = true; n.clients.forEach(c=>{ try{ c.end(); }catch(e){} }); } }, 600);
   backToLobby();
 }
 function backToLobby(){
   store.del('ff_seat', true);
-  clearTimeout(retryTimer); retryTimer = null;
-  if (!isHost) setTimeout(teardownClient, 300);
-  isHost = false; currentCode = null; latestState = null; peerConns = {};
+  clearTimeout(joinTimer);
+  isHost = false; currentCode = null; latestState = null; roster = {}; joinedOnce = false; turnDeadline = 0;
   history.replaceState(null, '', location.pathname + location.search);
   el('table').style.display = 'none';
   el('lobby').style.display = 'flex';
   hideConnBar();
   refreshResumeBox();
+  resetLobbyButtons();
   setLobbyStatus('Ready', 'ok');
+  document.title = 'Felt & Fortune — Poker Night';
 }
 function inviteUrl(){ return location.origin + location.pathname + '#room=' + currentCode; }
 async function shareInvite(preferShare){
@@ -1335,6 +1486,16 @@ function enterTable(code, hosting){
   hideConnBar();
   updateNetStatus();
   render();
+}
+// Live countdowns for the turn timer.
+function updateTimers(){
+  document.querySelectorAll('[data-timer]').forEach(e=>{
+    const left = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - Date.now())/1000)) : null;
+    if (left==null){ e.style.display='none'; return; }
+    e.style.display = '';
+    e.textContent = left+'s';
+    e.classList.toggle('low', left<=10);
+  });
 }
 
 /* ---------- rendering ---------- */
@@ -1395,7 +1556,7 @@ function render(){
   const betting = isBetting(s);
   const myTurn = betting && me && s.turnSeat===myIndex;
   if (myTurn && !wasMyTurn){
-    try{ navigator.vibrate && navigator.vibrate([40,40,40]); }catch(e){}
+    try{ if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate([40,40,40]); }catch(e){}
     if (document.hidden) document.title = '● Your turn — Felt & Fortune';
   }
   if (!myTurn) document.title = 'Felt & Fortune — Poker Night';
@@ -1414,6 +1575,7 @@ function render(){
   renderActions(s, me, myIndex);
   lastFelt = {s, me, myIndex, highlight, winners, betting};
   renderFelt();
+  updateTimers();
 }
 function renderFelt(){
   if (!lastFelt || !currentCode) return;
@@ -1460,7 +1622,9 @@ function renderFelt(){
     const ch = document.createElement('div'); ch.className='ch'; ch.textContent = fmt(p.chips); meta.appendChild(ch);
     pod.appendChild(meta);
     if (s.dealerSeat===seatIdx && s.handNum>0){ const dc=document.createElement('div'); dc.className='dealer-btn'; dc.textContent='D'; pod.appendChild(dc); }
+    if (betting && s.turnSeat===seatIdx){ const tm=document.createElement('span'); tm.className='timer'; tm.dataset.timer='1'; pod.appendChild(tm); }
     seat.appendChild(pod);
+    if (isHost && p.away && !betting){ seat.classList.add('kickable'); seat.onclick = ()=>hostKick(p.id, p.name); }
 
     const tag = seatTag(s, p, winners);
     if (tag){ const t=document.createElement('div'); t.className='seat-tag '+(tag.cls||''); t.textContent=tag.text; seat.appendChild(t); }
@@ -1542,7 +1706,8 @@ function seatAngles(m, hasHero, rx, ry){
   return out;
 }
 function seatTag(s, p, winners){
-  if (p.away) return {text:'away', cls:'red'};
+  if (p.away) return {text: isHost && !isBetting(s) ? 'away · tap to remove' : 'away', cls:'red'};
+  if (p.sitOut && !(isBetting(s) && p.inHand && !p.folded)) return {text:'sitting out'};
   if (s.stage==='showdown' && winners.has(p.id)) return {text: p.revealedHand ? p.revealedHand : 'winner', cls:'gold'};
   if (s.stage==='showdown' && p.revealedHand) return {text:p.revealedHand};
   if (p.allIn && p.inHand && !p.folded) return {text:'all in', cls:'gold'};
@@ -1583,14 +1748,16 @@ function renderHero(s, me, myIndex, highlight, winners){
     const all = [...me.cards, ...s.community];
     hand.textContent = all.length>=5 ? handLabel(evaluate7(all)) : preflopLabel(me.cards);
   }
-  if (me.folded && me.inHand) sub.textContent = 'Folded';
+  if (me.sitOut && !(isBetting(s) && me.inHand && !me.folded)) sub.textContent = 'Sitting out';
+  else if (me.folded && me.inHand) sub.textContent = 'Folded';
   else if (me.allIn && me.inHand) sub.textContent = 'All in';
   else if (s.stage==='showdown' && winners.has(me.id)) { sub.textContent = 'You win! 🎉'; sub.style.color='var(--gold)'; }
   else if (isBetting(s) && !me.inHand) sub.textContent = 'Dealt in next hand';
   else if (isBetting(s) && s.turnSeat===myIndex){
     const toCall = s.currentBet - me.bet;
-    sub.textContent = toCall>0 ? `${fmt(Math.min(toCall, me.chips))} to call` : 'Your move';
+    sub.textContent = toCall>0 ? `${fmt(Math.min(toCall, me.chips))} to call ` : 'Your move ';
     sub.style.color = 'var(--gold)';
+    const tm = document.createElement('span'); tm.className='timer'; tm.dataset.timer='1'; sub.appendChild(tm);
   }
   right.appendChild(hand); right.appendChild(sub);
   hero.appendChild(right);
@@ -1601,19 +1768,27 @@ function renderActions(s, me, myIndex){
   area.innerHTML = '';
   const betting = isBetting(s);
 
+  if (me && me.sitOut && !(betting && me.inHand && !me.folded)){
+    const row = document.createElement('div'); row.className='center-row';
+    const b = document.createElement('button'); b.className='btn btn-gold'; b.textContent="I'm back, deal me in";
+    b.onclick = ()=>requestSitOut(false); row.appendChild(b);
+    area.appendChild(row);
+    const note=document.createElement('div'); note.className='wait-note'; note.textContent="You're sitting out, so you won't be dealt in.";
+    area.appendChild(note);
+    return;
+  }
   if (!betting){
-    const eligibleCount = s.players.filter(p=>!p.away && p.chips>0).length;
+    const eligibleCount = s.players.filter(p=>!p.away && !p.sitOut && p.chips>0).length;
+    const row = document.createElement('div'); row.className='center-row';
     if (me && me.chips===0){
-      const row = document.createElement('div'); row.className='center-row';
-      const rb = document.createElement('button'); rb.className='btn btn-ghost'; rb.textContent=`Rebuy ${fmt(START_CHIPS)}`;
+      const rb = document.createElement('button'); rb.className='btn btn-ghost'; rb.textContent=`Rebuy ${fmt(s.startChips||START_CHIPS)}`;
       rb.onclick = requestRebuy; row.appendChild(rb);
-      const deal = dealBtn(s, eligibleCount); row.appendChild(deal);
-      area.appendChild(row);
-    } else {
-      const row = document.createElement('div'); row.className='center-row';
-      row.appendChild(dealBtn(s, eligibleCount));
-      area.appendChild(row);
+    } else if (me && s.handNum>0){
+      const so = document.createElement('button'); so.className='btn btn-ghost sit-btn'; so.textContent='Sit out';
+      so.onclick = ()=>requestSitOut(true); row.appendChild(so);
     }
+    row.appendChild(dealBtn(s, eligibleCount));
+    area.appendChild(row);
     if (eligibleCount<2){
       const note=document.createElement('div'); note.className='wait-note';
       note.textContent = s.players.length<2 ? 'Share the room code — you need at least 2 players.' : 'Need at least 2 players with chips to deal.';
@@ -1627,7 +1802,7 @@ function renderActions(s, me, myIndex){
     note.innerHTML = '';
     const lead = me && me.allIn && me.inHand ? "You're all in. " : (me && me.folded && me.inHand ? 'You folded. ' : (me && !me.inHand ? "You'll be dealt in next hand. " : ''));
     note.append(lead + (tp ? 'Waiting on ' : ''));
-    if (tp){ const b=document.createElement('b'); b.textContent=tp.name; note.appendChild(b); }
+    if (tp){ const b=document.createElement('b'); b.textContent=tp.name; note.appendChild(b); const tm=document.createElement('span'); tm.className='timer'; tm.dataset.timer='1'; note.appendChild(tm); }
     area.appendChild(note);
     return;
   }
@@ -1636,10 +1811,17 @@ function renderActions(s, me, myIndex){
     const note=document.createElement('div'); note.className='wait-note';
     note.append('Waiting on ');
     const b=document.createElement('b'); b.textContent = tp ? tp.name : '…'; note.appendChild(b);
+    const tm=document.createElement('span'); tm.className='timer'; tm.dataset.timer='1'; note.appendChild(tm);
     area.appendChild(note);
     return;
   }
 
+  if (pendingVer!=null && pendingVer===s.ver){
+    const note=document.createElement('div'); note.className='wait-note';
+    note.innerHTML = '<span class="spinner"></span>Sending…';
+    area.appendChild(note);
+    return;
+  }
   const toCall = s.currentBet - me.bet;
   const maxBet = me.bet + me.chips;
   const minTarget = Math.min(maxBet, s.currentBet + s.minRaise);
@@ -1735,7 +1917,8 @@ function selectTab(join){
 function openLog(open){ el('logDrawer').classList.toggle('open', open); el('scrim').classList.toggle('show', open); }
 function refreshResumeBox(){
   const saved = store.json('ff_host_save');
-  if (saved && saved.code && saved.state){
+  const invite = location.hash.match(/room=([A-Z0-9]{5})/i);
+  if (saved && saved.code && saved.state && !(invite && invite[1].toUpperCase()!==saved.code)){
     const others = saved.state.players.length - 1;
     el('resumeHint').textContent = `You were hosting table ${saved.code}${others>0 ? ` with ${others} other player${others>1?'s':''}` : ''}. Reopen it and their pages will reconnect automatically.`;
     el('resumeBox').style.display = 'block';
@@ -1782,7 +1965,13 @@ document.addEventListener('keydown', e=>{
   const m = location.hash.match(/room=([A-Z0-9]{5})/i);
   if (m){ el('codeInput').value = m[1].toUpperCase(); selectTab(true); }
   refreshResumeBox();
-  if (typeof Peer === 'undefined'){
+  const st = store.json('ff_settings');
+  if (st){
+    if (st.startChips) el('setChips').value = String(st.startChips);
+    if (st.bigBlind) el('setBlinds').value = st.smallBlind+'/'+st.bigBlind;
+    if (st.turnSecs!=null) el('setTimer').value = String(st.turnSecs);
+  }
+  if (!window.mqtt){
     setLobbyStatus('Could not load the networking library — check your connection and reload.', 'bad');
   } else {
     setLobbyStatus(m ? `Invite for table ${m[1].toUpperCase()} — enter your name and join` : 'Ready', 'ok');
@@ -1790,7 +1979,7 @@ document.addEventListener('keydown', e=>{
   (savedName ? (m ? el('joinBtn') : el('hostBtn')) : el('nameInput')).focus({preventScroll:true});
   // Reloading the page while seated drops you straight back into your seat.
   let seat = null; try{ seat = JSON.parse(store.get('ff_seat', true)); }catch(e){}
-  if (seat && m && seat.code===m[1].toUpperCase() && typeof Peer!=='undefined'){
+  if (seat && m && seat.code===m[1].toUpperCase() && window.mqtt){
     el('nameInput').value = seat.name;
     joinTable();
   }

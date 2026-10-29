@@ -48,6 +48,29 @@ const act = (s, type, amt) => { const p = s.players[s.turnSeat]; const r = E.app
 { let s = table(3); s.players[2].away = true; s = E.startHand(s).state;
   check('away player not dealt in', !s.players[2].inHand); }
 
+
+// host table settings
+{ let s = E.newTable('T', {startChips:2000, smallBlind:25, bigBlind:50, turnSecs:60}); s = E.addPlayer(s,'a','A'); s = E.addPlayer(s,'b','B');
+  check('custom starting chips', s.players[0].chips===2000);
+  s = E.startHand(s).state; check('custom blinds posted', s.currentBet===50 && s.players.some(p=>p.bet===25)); }
+
+// sitting-out players aren't dealt in
+{ let s = table(3); s.players[1].sitOut = true; s = E.startHand(s).state;
+  check('sitting-out player not dealt in', !s.players[1].inHand && s.players[0].inHand && s.players[2].inHand); }
+
+// side pots: short all-in can only win what they put in
+{ let s = table(3); s.players[0].chips = 100;
+  s = E.startHand(s).state;
+  // force known cards: p0 has the best hand, p1 second, p2 worst
+  s.players[0].cards = ['AS','AH']; s.players[1].cards = ['KS','KH']; s.players[2].cards = ['2C','7D'];
+  s.deck = s.deck.filter(c=>!['AS','AH','KS','KH','2C','7D','3D','4C','9H','8S','JC','QD','5H','6S'].includes(c)).concat(['6S','5H','QD','JC','8S','9H','4C','3D']); // dealt from the end
+  while (E.isBetting(s)){
+    const p = s.players[s.turnSeat];
+    const r = p.id==='p0' ? E.applyAction(s,p.id,'allin') : (s.currentBet-p.bet>0 ? E.applyAction(s,p.id,'call') : E.applyAction(s,p.id,s.stage==='flop' && p.id==='p1' ? 'bet' : 'check', 200));
+    s = E.advanceAfterAction(r.state);
+  }
+  check('short all-in wins only main pot', s.players[0].chips===300 && s.players[1].chips===1100 && s.players[2].chips===700); }
+
 // chip conservation over random multi-player hands
 const total = s => s.players.reduce((a,p)=>a+p.chips+p.totalBet,0);
 for (const n of [2,3,5,9]){

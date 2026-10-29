@@ -1,55 +1,52 @@
 # Felt & Fortune: developer notes
 
-Single-file Texas Hold'em app (`index.html`, no build step). Virtual chips, 1000 start, blinds 5/10, up to 9 players.
+Single-file Texas Hold'em app (`index.html`, no build step). Virtual chips, up to 9 players.
+The host picks the starting chips, blinds and turn timer.
 
 ## Architecture
 - **Rules engine**: pure functions over one state object, between the `ENGINE START` / `ENGINE END`
   markers in `index.html`. `tests/engine.js` loads that block straight from `index.html`, so the
-  tests always run the code that ships (no copy to keep in sync).
-- **Networking**: PeerJS (WebRTC). The host's browser holds the real state. Its PeerJS id is
-  `feltfortune-v2-<ROOM CODE>`. Players connect with a random PeerJS id and send
-  `{type:'join', id, name}`. Their player id is kept in `sessionStorage`, so each tab is its own player and a reload keeps your seat.
-- The host sends each player a **personal view** (`viewFor`): no deck, and nobody else's hole cards
-  until they're shown down.
-- Messages from player to host: `join`, `start`, `action`, `rebuy`, `leave`. From host to player:
-  `state`, `error`, `rejected` (table full), `closed`.
+  tests always run the code that ships.
+- **Networking (v3)**: messages go through public MQTT brokers over secure WebSockets
+  (`wss://broker.emqx.io:8084` and `wss://broker.hivemq.com:8884`, via mqtt.js 5.10.4).
+  Every message is published to **both** relays, and receivers drop duplicates by message id (`mid`).
+- **Room isolation**: the topic is `feltfortune/v3/<sha256("room:"+CODE)[:32]>`. The payload is
+  AES-GCM encrypted with a key derived by PBKDF2 from the room code. Strangers on the public broker see
+  only random topic names and ciphertext.
+- **Topics**: `/h` is the host's inbox. `/p/<inbox>` is each player's private inbox (a random id
+  the player picks per session). `/all` carries host heartbeats, host-takeover announcements and "table closed".
+- **Host = referee.** The host keeps the full state and sends each player a personal view
+  (`viewFor`): no deck, nobody else's hole cards until shown down, and other players' private
+  ids replaced with `seatN` aliases so they can't be used to send moves in someone else's name.
+- **Presence**: players ping every 4 s, and the host heartbeats every 4 s. 16 s of silence counts
+  as disconnected: the player is marked away, or the player's page shows "host isn't responding".
+  The host gives everyone a grace period after its own tab was asleep, so a phone screen turning
+  off doesn't mark the whole table away.
+- **State versions**: every host commit bumps `state.ver`. Players ignore older or repeated
+  versions, and ask for a resync when a heartbeat shows they missed one.
+- **Resume**: the host's state is saved in `localStorage`. **Resume table** reopens the same room,
+  and players' pings re-register them automatically. If the same table is opened in two places,
+  the newer one wins and the older one steps down.
 
-## Why joining used to fail (fixed)
-1. **Error messages were invisible in the lobby.** The toast lived inside the hidden table screen,
-   so join errors never showed up. Toasts are now global, and the lobby also shows errors inline.
-2. **The custom ICE config removed PeerJS's working TURN relay.** The Open Relay demo
-   credentials (`openrelayproject`) no longer work. Overriding `config` dropped PeerJS's own
-   default TURN servers (`turn:*.turn.peerjs.com`), so players on different networks couldn't connect.
-   The PeerJS defaults are now back, plus an extra STUN server.
-3. **The host lost its room code when the tab went to the background.** On phones the broker
-   socket drops when you switch apps (e.g. to WhatsApp to share the code), and the table can't be found
-   until it re-registers. The host now reconnects automatically: on an interval, and on `visibilitychange`.
-4. **Player PeerJS ids collided.** The joiner's PeerJS id was a fixed id from `localStorage`. With
-   two tabs, or a fast reconnect, that gave `unavailable-id`. Joiners now get a random PeerJS id.
-5. PeerJS wasn't pinned (`peerjs@1`), so its version could change silently. It's now pinned to `1.5.5`.
+## Why friends couldn't join (v2 → v3)
+v2 used PeerJS (WebRTC peer-to-peer). Two players on different networks need a TURN relay to connect.
+PeerJS's free TURN server (`turn:*.turn.peerjs.com`) returned **no relay candidates** in testing,
+so it's dead or overloaded. So joining only worked when both players were on the same network.
+v3 drops peer-to-peer entirely. Everyone makes ordinary outbound secure-WebSocket connections
+to the relays, which works on Wi-Fi, mobile data, and mixes of both.
 
-## Other fixes
-- Two players tapping **Deal** at the same time restarted the hand that was in progress. A hand
-  can't be dealt now while one is running.
-- Players who reconnected stayed "sitting out" forever. Now they're dealt back in.
-- A player who disconnected mid-hand froze the table when their turn came. Away players now
-  auto-check, or auto-fold if there's a bet.
-- The raise slider snapped to multiples of 10, so **Max** could send less than a real all-in.
-- The minimum raise wasn't enforced by the host.
-- The burn card is used before each street. Shuffling uses `crypto.getRandomValues`.
-- The **Resume** button failed if you clicked it within a few seconds of a reload. It now retries
-  while the broker frees the old id. Players reconnect automatically when the host comes back.
-- Players can **rebuy** when they're out of chips, and they can **leave** the table cleanly.
-
-## If connections still fail
-Some strict networks (certain mobile carriers, corporate Wi-Fi) need a TURN relay. PeerJS's free
-relay is shared and best-effort. For the most reliable setup, create a free TURN account
-(metered.ca or Cloudflare Calls) and add its server to `ICE_SERVERS` in `index.html`.
-Long term, a small WebSocket server would also remove the need for the host to keep their tab open.
+## Known limits
+- The relays are free community services with no uptime guarantee. Using two of them covers
+  most outages. If both ever go away, swap in other public brokers in `RELAYS`, or a free
+  private one (HiveMQ Cloud and EMQX Cloud both have free tiers).
+- A player at the table who knows the room code and digs into dev tools could still read
+  other players' join messages. This is fine for friends, but not for real-money play.
+- A few strict networks block ports 8084/8884. Mobile data works around that.
 
 ## Tests
 ```
 node tests/run.js
 ```
-The tests cover hand ranking, labels, heads-up blinds, the min-raise rule, the double-deal guard,
-blinds that put players all-in, rebuys, and chip conservation over hundreds of random hands for 2, 3, 5 and 9 players.
+The tests cover hand ranking and labels, heads-up blinds, the min-raise rule, the double-deal
+guard, blinds that put players all-in, rebuys, custom chips and blinds, sitting out, side pots,
+and chip conservation over hundreds of random hands for 2, 3, 5 and 9 players.
